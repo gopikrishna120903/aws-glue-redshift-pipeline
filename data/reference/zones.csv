@@ -1,0 +1,13 @@
+zone_id,zone_name,borough
+1,Downtown,Central
+2,Midtown,Central
+3,Uptown,North
+4,Airport,East
+5,University,West
+6,Harbor,South
+7,Old Town,Central
+8,Tech Park,North
+9,Stadium,East
+10,Riverside,West
+11,Medical Center,South
+12,Suburbs,North

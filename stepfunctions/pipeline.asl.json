@@ -1,0 +1,103 @@
+{
+  "Comment": "Ride-share pipeline: Glue transform -> Redshift COPY/MERGE -> data quality checks. Retries transient errors and alerts on failure.",
+  "StartAt": "RunGlueTransform",
+  "States": {
+    "RunGlueTransform": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${glue_job_name}"
+      },
+      "ResultPath": "$.glue",
+      "Retry": [
+        {
+          "ErrorEquals": ["Glue.ConcurrentRunsExceededException", "Glue.InternalServiceException"],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }],
+      "Next": "LoadRedshift"
+    },
+    "LoadRedshift": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Lambda wraps rides_pipeline.redshift_loader: builds COPY + MERGE for the run's partitions and runs them as one transaction via the Redshift Data API.",
+      "Parameters": {
+        "FunctionName": "${loader_function_name}",
+        "Payload": {
+          "manifest_bucket": "${landing_bucket}",
+          "manifest_key": "${manifest_key}"
+        }
+      },
+      "ResultPath": "$.load",
+      "Retry": [
+        { "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2 }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }],
+      "Next": "RunQualityChecks"
+    },
+    "RunQualityChecks": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+      "Parameters": {
+        "WorkgroupName": "${redshift_workgroup}",
+        "Database": "${redshift_database}",
+        "Sql": "SELECT (SELECT COUNT(*) FROM (SELECT trip_id FROM analytics.fact_trips GROUP BY trip_id HAVING COUNT(*) > 1)) + (SELECT COUNT(*) FROM analytics.fact_trips WHERE dropoff_ts <= pickup_ts OR fare_amount < 0 OR distance_miles <= 0) AS failures"
+      },
+      "ResultPath": "$.dq",
+      "Next": "WaitForChecks"
+    },
+    "WaitForChecks": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "GetCheckStatus"
+    },
+    "GetCheckStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+      "Parameters": { "Id.$": "$.dq.Id" },
+      "ResultPath": "$.dqStatus",
+      "Next": "ChecksFinished?"
+    },
+    "ChecksFinished?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.dqStatus.Status", "StringEquals": "FINISHED", "Next": "GetCheckResult" },
+        { "Or": [
+            { "Variable": "$.dqStatus.Status", "StringEquals": "FAILED" },
+            { "Variable": "$.dqStatus.Status", "StringEquals": "ABORTED" }
+          ], "Next": "NotifyFailure" }
+      ],
+      "Default": "WaitForChecks"
+    },
+    "GetCheckResult": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:redshiftdata:getStatementResult",
+      "Parameters": { "Id.$": "$.dq.Id" },
+      "ResultSelector": { "failures.$": "$.Records[0][0].LongValue" },
+      "ResultPath": "$.dqResult",
+      "Next": "ChecksPassed?"
+    },
+    "ChecksPassed?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.dqResult.failures", "NumericEquals": 0, "Next": "Success" }
+      ],
+      "Default": "NotifyFailure"
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${alerts_topic_arn}",
+        "Subject": "Ride-share pipeline failed",
+        "Message.$": "States.JsonToString($)"
+      },
+      "Next": "Fail"
+    },
+    "Fail": { "Type": "Fail", "Error": "PipelineFailed" },
+    "Success": { "Type": "Succeed" }
+  }
+}
