@@ -4,6 +4,10 @@
 
 A serverless batch pipeline on **AWS** for ride-share trip data. JSON files land in **S3**, an **AWS Glue** (PySpark) job cleans, deduplicates, validates, and enriches them into partitioned Parquet, and a **Step Functions** workflow loads the results into **Amazon Redshift Serverless** with COPY + MERGE, runs data quality checks, and alerts on failure. All infrastructure is defined in **Terraform**.
 
+## Why I built this
+
+Most of my pipeline work has been on Azure, and I wanted to show I can design the same kind of system on AWS using its own services rather than translating an Azure design one-to-one. I chose a batch pipeline with messy input on purpose, because the interesting work is in handling duplicates, bad records, and reruns safely, not in moving clean files. I also wanted the whole setup in Terraform, so the infrastructure is reviewable and repeatable instead of clicked together in the console.
+
 ## Architecture
 
 ```mermaid
@@ -75,7 +79,14 @@ cp terraform.tfvars.example terraform.tfvars   # set your alert email
 terraform init && terraform plan
 ```
 
-## Tests (23)
+## Cost notes
+
+- **Glue** is billed per DPU-hour while the job runs, so an hourly job with 2 small workers only costs for the minutes it's actually processing. If volumes stayed this small, a Glue Python shell job or a Lambda function could be even cheaper than Spark.
+- **Redshift Serverless** bills for compute only while queries run, instead of an always-on cluster. The base capacity is set to the smallest size (8 RPUs) and can be raised if dashboards get slow.
+- **Step Functions, EventBridge, and SNS** cost very little at one run per hour.
+- **What I'd watch on the bill:** Glue run time creeping up as data grows, Redshift usage from dashboard queries rather than loads, S3 storage (the lifecycle rule moves raw files to cheaper storage after 30 days and deletes them after 180), and CloudWatch log retention, which defaults to keeping logs forever.
+
+## Tests (24)
 
 - **Transforms:** type casting, latest-version dedup, each validation rule (including rows that break several), derived metrics, speed outliers, aggregates
 - **Manifest (moto S3):** first run sees all files, processed files are skipped, re-sent files are reprocessed, run history is recorded
@@ -113,7 +124,7 @@ src/rides_pipeline/
 sql/redshift/          tables (dist/sort keys), reporting views, data quality checks
 stepfunctions/         state machine definition
 infra/terraform/       all AWS resources
-tests/                 23 tests
+tests/                 24 tests
 ```
 
 ## Tech
