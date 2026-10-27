@@ -76,6 +76,7 @@ def validate(df: DataFrame, zones: DataFrame) -> tuple[DataFrame, DataFrame]:
          | (F.col("distance_miles") > MAX_TRIP_MILES)),
         ("negative_amount", (F.col("fare_amount") < 0) | (F.col("tip_amount") < 0)),
         ("unknown_zone", F.col("_pu").isNull() | F.col("_do").isNull()),
+        ("same_zone_tiny_trip", (F.col("pickup_zone_id") == F.col("dropoff_zone_id")) & (F.col("distance_miles") < 0.2)),
     ]
     reasons = F.array_compact(F.array(*[F.when(cond, F.lit(name)) for name, cond in rules]))
     checked = checked.withColumn("reject_reasons", reasons).drop("_pu", "_do")

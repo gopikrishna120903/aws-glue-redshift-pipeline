@@ -82,3 +82,16 @@ def test_daily_zone_metrics_aggregates(spark, zones):
     assert m.trips == 3 and m.active_drivers == 2
     assert m.fare_revenue == Decimal("75.00") and m.tips == Decimal("15.00")
     assert abs(m.surge_share - 2 / 3) < 1e-3
+
+
+def test_same_zone_tiny_trips_are_rejected(spark, zones):
+    df = frame(spark, [
+        trip(trip_id="TINY", dropoff_zone_id="1", distance_miles="0.1"),
+        trip(trip_id="SAME_ZONE_OK", dropoff_zone_id="1", distance_miles="2.0"),
+        trip(trip_id="SHORT_OK", distance_miles="0.1"),
+    ])
+    valid, rejected = validate(df, zones)
+    rejected_rows = rejected.collect()
+    assert [r.trip_id for r in rejected_rows] == ["TINY"]
+    assert list(rejected_rows[0].reject_reasons) == ["same_zone_tiny_trip"]
+    assert sorted(r.trip_id for r in valid.collect()) == ["SAME_ZONE_OK", "SHORT_OK"]
